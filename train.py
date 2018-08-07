@@ -62,7 +62,8 @@ vgg_checkpoint_path = FLAGS.checkpoint_path
 global_step = tf.Variable(0, trainable=False, name='global_step', dtype=tf.int64)
 
 
-# Define the model that we want to use -- specify to use only two classes at the last layer
+# Define the model that we want to use
+# We set fc_conv_padding='SAME' to keep the shape of logits stay the same as pool5 after the 7X7 conv2d.
 with slim.arg_scope(vgg.vgg_arg_scope()):
     logits, end_points = vgg.vgg_16(image_tensor,
                                     num_classes=number_of_classes,
@@ -70,86 +71,74 @@ with slim.arg_scope(vgg.vgg_arg_scope()):
                                     spatial_squeeze=False,
                                     fc_conv_padding='SAME')
 
-downsampled_logits_shape = tf.shape(logits)
-
+logits_shape = tf.shape(logits)
 img_shape = tf.shape(image_tensor)
 
-# Calculate the ouput size of the upsampled tensor
+# Calculate the ouput size of the final tensor
 # The shape should be batch_size X width X height X num_classes
-upsampled_logits_shape = tf.stack([
-                                  downsampled_logits_shape[0],
-                                  img_shape[1],
-                                  img_shape[2],
-                                  downsampled_logits_shape[3]
-                                  ])
+final_logits_shape = tf.stack([logits_shape[0],
+                               img_shape[1],
+                               img_shape[2],
+                               logits_shape[3]])
 
 pool3_feature = end_points['vgg_16/pool3']
 pool4_feature = end_points['vgg_16/pool4']
 
 with tf.variable_scope('fcn'):
-
-    # Perform the X2 upsampling   Pool5x2&4
     pool4_predict_logits = slim.conv2d(pool4_feature, number_of_classes, [1, 1],
-                                 activation_fn=None,
-                                 weights_initializer=tf.zeros_initializer,
-                                 scope='conv_pool4')
+                                       activation_fn=None,
+                                       weights_initializer=tf.zeros_initializer,
+                                       scope='conv_pool4')
 
-    upsample_filter_np_x2 = bilinear_upsample_weights(2,  # upsample_factor,
-                                                  number_of_classes)
-
-    upsample_filter_tensor_x2 = tf.Variable(upsample_filter_np_x2, name='pool4/t_conv_x2')
+    # Perform the X2 upsampling
+    upsample_factor = 2
+    upsample_filter_np_x2 = bilinear_upsample_weights(upsample_factor, number_of_classes)
+    upsample_filter_tensor_x2 = tf.Variable(upsample_filter_np_x2, name='pool5/t_conv_x2')
 
     upsampled_logits = tf.nn.conv2d_transpose(logits, upsample_filter_tensor_x2,
-                                          output_shape=tf.shape(pool4_predict_logits),
-                                          strides=[1, 2, 2, 1],
-                                          padding='SAME')
-
+                                              output_shape=tf.shape(pool4_predict_logits),
+                                              strides=[1, upsample_factor, upsample_factor, 1],
+                                              padding='SAME')
 
     upsampled_logits = upsampled_logits + pool4_predict_logits
 
-    # Perform the X2 upsampling   upsampled_logits x2 & pool3
     pool3_predict_logits = slim.conv2d(pool3_feature, number_of_classes, [1, 1],
-                                 activation_fn=None,
-                                 weights_initializer=tf.zeros_initializer,
-                                 scope='conv_pool3')
+                                       activation_fn=None,
+                                       weights_initializer=tf.zeros_initializer,
+                                       scope='conv_pool3')
 
-    upsample_filter_np_x2 = bilinear_upsample_weights(2, 
-                                                  number_of_classes)
-
-    upsample_filter_tensor_x2 = tf.Variable(upsample_filter_np_x2, name='pool3/t_conv_x2')
+    # Perform the X2 upsampling
+    upsample_factor = 2
+    upsample_filter_np_x2 = bilinear_upsample_weights(upsample_factor, number_of_classes)
+    upsample_filter_tensor_x2 = tf.Variable(upsample_filter_np_x2, name='pool4/t_conv_x2')
 
     upsampled_logits = tf.nn.conv2d_transpose(upsampled_logits, upsample_filter_tensor_x2,
-                                          output_shape=tf.shape(pool3_predict_logits),
-                                          strides=[1, 2, 2, 1],
-                                          padding='SAME')
-
+                                              output_shape=tf.shape(pool3_predict_logits),
+                                              strides=[1, upsample_factor, upsample_factor, 1],
+                                              padding='SAME')
 
     upsampled_logits = upsampled_logits + pool3_predict_logits
 
+    # Perform the X8 upsampling
+    upsample_factor = 8
+    upsample_filter_np_x8 = bilinear_upsample_weights(upsample_factor, number_of_classes)
+    upsample_filter_tensor_x8 = tf.Variable(upsample_filter_np_x8, name='pool3/t_conv_x8')
 
-
-    # Perform the X8 upsampling   upsampled_logits x8
-    upsample_filter_np_x8 = bilinear_upsample_weights(8,
-                                                   number_of_classes)
-
-    upsample_filter_tensor_x8 = tf.Variable(upsample_filter_np_x8, name='fcn/t_conv_x8')
     upsampled_logits = tf.nn.conv2d_transpose(upsampled_logits, upsample_filter_tensor_x8,
-                                          output_shape=upsampled_logits_shape,
-                                          strides=[1, 8, 8, 1],
-                                          padding='SAME')
-
+                                              output_shape=final_logits_shape,
+                                              strides=[1, upsample_factor, upsample_factor, 1],
+                                              padding='SAME')
 
     lbl_onehot = tf.one_hot(annotation_tensor, number_of_classes)
     cross_entropies = tf.nn.softmax_cross_entropy_with_logits(logits=upsampled_logits,
-                                                          labels=lbl_onehot)
+                                                              labels=lbl_onehot)
 
     cross_entropy_loss = tf.reduce_mean(tf.reduce_sum(cross_entropies, axis=-1))
 
-
-# Tensor to get the final prediction for each pixel -- pay
-# attention that we don't need softmax in this case because
-# we only need the final decision. If we also need the respective
-# probabilities we will have to apply softmax.
+    # Tensor to get the final prediction for each pixel -- pay
+    # attention that we don't need softmax in this case because
+    # we only need the final decision. If we also need the respective
+    # probabilities we will have to apply softmax.
     pred = tf.argmax(upsampled_logits, axis=3)
 
     probabilities = tf.nn.softmax(upsampled_logits)
@@ -189,12 +178,12 @@ with tf.variable_scope("adam_vars"):
 # which is responsible for class predictions. We do this because
 # we will have different number of classes to predict and we can't
 # use the old ones as an initialization.
-vgg_except_fc8_weights = slim.get_variables_to_restore(exclude=['vgg_16/fc8', 'adam_vars'])
+vgg_except_fc8_weights = slim.get_variables_to_restore(exclude=['vgg_16/fc8', 'adam_vars', 'fcn'])
 
 # Here we get variables that belong to the last layer of network.
 # As we saw, the number of classes that VGG was originally trained on
 # is different from ours -- in our case it is only 2 classes.
-vgg_fc8_weights = slim.get_variables_to_restore(include=['vgg_16/fc8'])
+vgg_fc8_weights = slim.get_variables_to_restore(include=['vgg_16/fc8', 'fcn'])
 
 adam_optimizer_variables = slim.get_variables_to_restore(include=['adam_vars'])
 
@@ -291,8 +280,7 @@ def perform_crf(image, probabilities):
 
 with sess:
     # Run the initializers.
-    sess.run(init_op)
-    sess.run(init_local_op)
+    sess.run(tf.group(init_op,init_local_op))
     if continue_train:
         saver.restore(sess, checkpoint_path)
 
@@ -343,7 +331,7 @@ with sess:
                 crf_ed = perform_crf(val_orig_image, val_poss)
                 cv2.imwrite(os.path.join(FLAGS.output_dir, 'eval', 'val_{0}_prediction_crfed.jpg'.format(gs)), cv2.cvtColor(grayscale_to_voc_impl(np.squeeze(crf_ed)), cv2.COLOR_RGB2BGR))
 
-                overlay = cv2.addWeighted(cv2.cvtColor(np.squeeze(val_orig_image), cv2.COLOR_RGB2BGR), 1, cv2.cvtColor(grayscale_to_voc_impl(np.squeeze(crf_ed)), cv2.COLOR_RGB2BGR), 0.8, 0)
+                overlay = cv2.addWeighted(cv2.cvtColor(np.squeeze(val_orig_image), cv2.COLOR_RGB2BGR), 1, cv2.cvtColor(grayscale_to_voc_impl(np.squeeze(crf_ed)), cv2.COLOR_RGB2BGR), 0.9, 0)
                 cv2.imwrite(os.path.join(FLAGS.output_dir, 'eval', 'val_{0}_overlay.jpg'.format(gs)), overlay)
 
     coord.request_stop()

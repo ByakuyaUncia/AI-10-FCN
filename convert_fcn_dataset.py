@@ -7,8 +7,6 @@ import numpy as np
 import tensorflow as tf
 from vgg import vgg_16
 
-from object_detection.utils import dataset_util
-from object_detection.utils import label_map_util
 
 flags = tf.app.flags
 flags.DEFINE_string('data_dir', '', 'Root directory to raw pet dataset.')
@@ -53,32 +51,34 @@ def dict_to_tf_example(data, label):
         # 保证最后随机裁剪的尺寸
         return None
 
-    # Your code here, fill the dict
     feature_dict = {
-        'image/height': dataset_util.int64_feature(height),
-        'image/width': dataset_util.int64_feature(width),
-        'image/filename': dataset_util.bytes_feature(data.split("/")[-1].encode('utf8')),
-        'image/encoded': dataset_util.bytes_feature(encoded_data),
-        'image/label': dataset_util.int64_list_feature(encoded_label),
-        'image/format': dataset_util.bytes_feature('jpeg'.encode('utf8')),
+        'image/height': tf.train.Feature(int64_list=tf.train.Int64List(value=[height])),
+        'image/width': tf.train.Feature(int64_list=tf.train.Int64List(value=[width])),
+        'image/filename': tf.train.Feature(bytes_list=tf.train.BytesList(value=[data.encode('utf8')])),
+        'image/encoded': tf.train.Feature(bytes_list=tf.train.BytesList(value=[encoded_data])),
+        'image/label': tf.train.Feature(bytes_list=tf.train.BytesList(value=[encoded_label])),
+        'image/format': tf.train.Feature(bytes_list=tf.train.BytesList(value=['jpeg'.encode('utf8')])),
     }
     example = tf.train.Example(features=tf.train.Features(feature=feature_dict))
     return example
 
 
 def create_tf_record(output_filename, file_pars):
-  writer = tf.python_io.TFRecordWriter(output_filename)
-  files = list(file_pars)
-  for idx, file in enumerate(files):
-    if idx % 100 == 0:
-      logging.info('On image %d', idx)
-    try:
-      tf_example = dict_to_tf_example(file[0], file[1])
-      writer.write(tf_example.SerializeToString())
-    except ValueError:
-      logging.warning('Invalid example: %s, ignoring.', xml_path)
+    # TODO del CODE
+    writer = tf.python_io.TFRecordWriter(output_filename)
+    for data, label in file_pars:
+        if not os.path.exists(data) or not os.path.exists(label):
+            logging.warning('Could not find [{0}], ignoring example.'.format((data, label)))
+            continue
 
-  writer.close()
+        try:
+            tf_example = dict_to_tf_example(data, label)
+            if not tf_example:
+                continue
+            writer.write(tf_example.SerializeToString())
+        except ValueError:
+            logging.warning('Invalid example: [{0}], ignoring example.'.format((data, label)))
+    writer.close()
 
 
 def read_images_names(root, train=True):
@@ -103,7 +103,6 @@ def main(_):
 
     train_files = read_images_names(FLAGS.data_dir, True)
     val_files = read_images_names(FLAGS.data_dir, False)
-	
     create_tf_record(train_output_path, train_files)
     create_tf_record(val_output_path, val_files)
 
